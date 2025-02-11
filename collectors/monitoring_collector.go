@@ -36,9 +36,17 @@ type MetricFilter struct {
 	FilterQuery          string
 }
 
+type MetricPrefixConfig struct {
+	Prefix     string
+	AggFields  string
+	AggAligner string
+	AggReducer string
+	AggPeriod  string
+}
+
 type MonitoringCollector struct {
 	projectID                       string
-	metricsTypePrefixes             []string
+	metricsTypePrefixes             []MetricPrefixConfig
 	metricsFilters                  []MetricFilter
 	metricsInterval                 time.Duration
 	metricsOffset                   time.Duration
@@ -62,7 +70,7 @@ type MonitoringCollector struct {
 type MonitoringCollectorOptions struct {
 	// MetricTypePrefixes are the Google Monitoring (ex-Stackdriver) metric type prefixes that the collector
 	// will be querying.
-	MetricTypePrefixes []string
+	MetricTypePrefixes []MetricPrefixConfig
 	// ExtraFilters is a list of criteria to apply to each corresponding metric prefix query. If one or more are
 	// applicable to a given metric type prefix, they will be 'AND' concatenated.
 	ExtraFilters []MetricFilter
@@ -319,6 +327,24 @@ func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metri
 					IntervalStartTime(startTime.Format(time.RFC3339Nano)).
 					IntervalEndTime(endTime.Format(time.RFC3339Nano))
 
+				// Apply aggregation parameters if specified
+				for _, metricConfig := range c.metricsTypePrefixes {
+					if strings.HasPrefix(metricDescriptor.Type, metricConfig.Prefix) {
+						if metricConfig.AggFields != "" {
+							timeSeriesListCall = timeSeriesListCall.AggregationGroupByFields(strings.Split(metricConfig.AggFields, ",")...)
+						}
+						if metricConfig.AggAligner != "" {
+							timeSeriesListCall = timeSeriesListCall.AggregationPerSeriesAligner(metricConfig.AggAligner)
+						}
+						if metricConfig.AggReducer != "" {
+							timeSeriesListCall = timeSeriesListCall.AggregationCrossSeriesReducer(metricConfig.AggReducer)
+						}
+						if metricConfig.AggPeriod != "" {
+							timeSeriesListCall = timeSeriesListCall.AggregationAlignmentPeriod(metricConfig.AggPeriod)
+						}
+					}
+				}
+
 				for {
 					c.apiCallsTotalMetric.Inc()
 					page, err := timeSeriesListCall.Do()
@@ -355,19 +381,19 @@ func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metri
 
 	for _, metricsTypePrefix := range c.metricsTypePrefixes {
 		wg.Add(1)
-		go func(metricsTypePrefix string) {
+		go func(metricsTypePrefix MetricPrefixConfig) {
 			defer wg.Done()
 			ctx := context.Background()
-			filter := fmt.Sprintf("metric.type = starts_with(\"%s\")", metricsTypePrefix)
+			filter := fmt.Sprintf("metric.type = starts_with(\"%s\")", metricsTypePrefix.Prefix)
 			if c.monitoringDropDelegatedProjects {
 				filter = fmt.Sprintf(
 					"project = \"%s\" AND metric.type = starts_with(\"%s\")",
 					c.projectID,
-					metricsTypePrefix)
+					metricsTypePrefix.Prefix)
 			}
 
-			if cached := c.descriptorCache.Lookup(metricsTypePrefix); cached != nil {
-				c.logger.Debug("using cached Google Stackdriver Monitoring metric descriptors starting with", "prefix", metricsTypePrefix)
+			if cached := c.descriptorCache.Lookup(metricsTypePrefix.Prefix); cached != nil {
+				c.logger.Debug("using cached Google Stackdriver Monitoring metric descriptors starting with", "prefix", metricsTypePrefix.Prefix)
 				if err := metricDescriptorsFunction(cached); err != nil {
 					errChannel <- err
 				}
@@ -380,14 +406,14 @@ func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metri
 					return metricDescriptorsFunction(r.MetricDescriptors)
 				}
 
-				c.logger.Debug("listing Google Stackdriver Monitoring metric descriptors starting with", "prefix", metricsTypePrefix)
+				c.logger.Debug("listing Google Stackdriver Monitoring metric descriptors starting with", "prefix", metricsTypePrefix.Prefix)
 				if err := c.monitoringService.Projects.MetricDescriptors.List(utils.ProjectResource(c.projectID)).
 					Filter(filter).
 					Pages(ctx, callback); err != nil {
 					errChannel <- err
 				}
 
-				c.descriptorCache.Store(metricsTypePrefix, cache)
+				c.descriptorCache.Store(metricsTypePrefix.Prefix, cache)
 			}
 		}(metricsTypePrefix)
 	}
@@ -449,6 +475,16 @@ func (c *MonitoringCollector) reportTimeSeriesMetrics(
 			if !c.keyExists(labelKeys, key) {
 				labelKeys = append(labelKeys, key)
 				labelValues = append(labelValues, value)
+			}
+		}
+
+		// Add the user-defined labels
+		if timeSeries.Metadata != nil && len(timeSeries.Metadata.UserLabels) > 0 {
+			for key, value := range timeSeries.Metadata.UserLabels {
+				if !c.keyExists(labelKeys, key) {
+					labelKeys = append(labelKeys, key)
+					labelValues = append(labelValues, value)
+				}
 			}
 		}
 

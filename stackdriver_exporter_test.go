@@ -13,8 +13,12 @@
 
 package main
 
-import "testing"
-import "reflect"
+import (
+	"reflect"
+	"testing"
+
+	"github.com/prometheus-community/stackdriver_exporter/collectors"
+)
 
 func TestParseMetricTypePrefixes(t *testing.T) {
 	inputPrefixes := []string{
@@ -24,21 +28,21 @@ func TestParseMetricTypePrefixes(t *testing.T) {
 		"redis.googleapis.com/stats/memory/usage_ratio",
 		"redis.googleapis.com/stats/memory/usage_ratio",
 	}
-	expectedOutputPrefixes := []string{
-		"loadbalancing.googleapis.com",
-		"redis.googleapis.com/stats/memory/usage",
+	expectedOutputPrefixes := []collectors.MetricPrefixConfig{
+		{Prefix: "loadbalancing.googleapis.com"},
+		{Prefix: "redis.googleapis.com/stats/memory/usage"},
 	}
 
 	outputPrefixes := parseMetricTypePrefixes(inputPrefixes)
 
 	if !reflect.DeepEqual(outputPrefixes, expectedOutputPrefixes) {
-		t.Errorf("Metric type prefix sanitization did not produce expected output. Expected:\n%s\nGot:\n%s", expectedOutputPrefixes, outputPrefixes)
+		t.Errorf("Metric type prefix sanitization did not produce expected output. Expected:\n%v\nGot:\n%v", expectedOutputPrefixes, outputPrefixes)
 	}
 }
 
 func TestFilterMetricTypePrefixes(t *testing.T) {
-	metricPrefixes := []string{
-		"redis.googleapis.com/stats/",
+	metricPrefixes := []collectors.MetricPrefixConfig{
+		{Prefix: "redis.googleapis.com/stats/"},
 	}
 
 	h := &handler{
@@ -51,13 +55,13 @@ func TestFilterMetricTypePrefixes(t *testing.T) {
 		"redis.googleapis.com":                          true,
 	}
 
-	expectedOutputPrefixes := []string{
-		"redis.googleapis.com/stats/memory/usage",
+	expectedOutputPrefixes := []collectors.MetricPrefixConfig{
+		{Prefix: "redis.googleapis.com/stats/"},
 	}
 
 	outputPrefixes := h.filterMetricTypePrefixes(inputFilters)
 
 	if !reflect.DeepEqual(outputPrefixes, expectedOutputPrefixes) {
-		t.Errorf("filterMetricTypePrefixes did not produce expected output. Expected:\n%s\nGot:\n%s", expectedOutputPrefixes, outputPrefixes)
+		t.Errorf("filterMetricTypePrefixes did not produce expected output. Expected:\n%v\nGot:\n%v", expectedOutputPrefixes, outputPrefixes)
 	}
 }

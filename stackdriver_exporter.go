@@ -182,7 +182,7 @@ type handler struct {
 	logger  *slog.Logger
 
 	projectIDs          []string
-	metricsPrefixes     []string
+	metricsPrefixes     []collectors.MetricPrefixConfig
 	metricsExtraFilters []collectors.MetricFilter
 	additionalGatherer  prometheus.Gatherer
 	m                   *monitoring.Service
@@ -204,7 +204,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.handler.ServeHTTP(w, r)
 }
 
-func newHandler(projectIDs []string, metricPrefixes []string, metricExtraFilters []collectors.MetricFilter, m *monitoring.Service, logger *slog.Logger, additionalGatherer prometheus.Gatherer) *handler {
+func newHandler(projectIDs []string, metricPrefixes []collectors.MetricPrefixConfig, metricExtraFilters []collectors.MetricFilter, m *monitoring.Service, logger *slog.Logger, additionalGatherer prometheus.Gatherer) *handler {
 	var ttl time.Duration
 	// Add collector caching TTL as max of deltas aggregation or descriptor caching
 	if *monitoringMetricsAggregateDeltas || *monitoringDescriptorCacheTTL > 0 {
@@ -233,15 +233,15 @@ func newHandler(projectIDs []string, metricPrefixes []string, metricExtraFilters
 }
 
 func (h *handler) getCollector(project string, filters map[string]bool) (*collectors.MonitoringCollector, error) {
-	filterdPrefixes := h.filterMetricTypePrefixes(filters)
-	collectorKey := fmt.Sprintf("%s-%v", project, filterdPrefixes)
+	filteredPrefixes := h.filterMetricTypePrefixes(filters)
+	collectorKey := fmt.Sprintf("%s-%v", project, filteredPrefixes)
 
 	if collector, found := h.collectors.Get(collectorKey); found {
 		return collector, nil
 	}
 
 	collector, err := collectors.NewMonitoringCollector(project, h.m, collectors.MonitoringCollectorOptions{
-		MetricTypePrefixes:        filterdPrefixes,
+		MetricTypePrefixes:        filteredPrefixes,
 		ExtraFilters:              h.metricsExtraFilters,
 		RequestInterval:           *monitoringMetricsInterval,
 		RequestOffset:             *monitoringMetricsOffset,
@@ -284,19 +284,19 @@ func (h *handler) innerHandler(filters map[string]bool) http.Handler {
 
 // filterMetricTypePrefixes filters the initial list of metric type prefixes, with the ones coming from an individual
 // prometheus collect request.
-func (h *handler) filterMetricTypePrefixes(filters map[string]bool) []string {
+func (h *handler) filterMetricTypePrefixes(filters map[string]bool) []collectors.MetricPrefixConfig {
 	filteredPrefixes := h.metricsPrefixes
 	if len(filters) > 0 {
 		filteredPrefixes = nil
 		for _, prefix := range h.metricsPrefixes {
 			for filter := range filters {
-				if strings.HasPrefix(filter, prefix) {
-					filteredPrefixes = append(filteredPrefixes, filter)
+				if strings.HasPrefix(filter, prefix.Prefix) {
+					filteredPrefixes = append(filteredPrefixes, prefix)
 				}
 			}
 		}
 	}
-	return parseMetricTypePrefixes(filteredPrefixes)
+	return filteredPrefixes
 }
 
 func main() {
@@ -426,28 +426,57 @@ func main() {
 	}
 }
 
-func parseMetricTypePrefixes(inputPrefixes []string) []string {
-	metricTypePrefixes := []string{}
+func parseMetricTypePrefixes(inputPrefixes []string) []collectors.MetricPrefixConfig {
+	metricConfigs := []collectors.MetricPrefixConfig{}
 
-	// Drop duplicate prefixes.
+	// Drop duplicate prefixes
 	slices.Sort(inputPrefixes)
 	uniquePrefixes := slices.Compact(inputPrefixes)
 
-	// Drop prefixes that start with another existing prefix to avoid error:
-	// "collected metric xxx was collected before with the same name and label values".
-	for i, prefix := range uniquePrefixes {
+	for i, input := range uniquePrefixes {
+		parts := strings.Split(input, "|")
+		prefix := parts[0]
+		config := collectors.MetricPrefixConfig{Prefix: prefix}
+
 		if i != 0 {
-			previousIndex := len(metricTypePrefixes) - 1
+			previousIndex := len(metricConfigs) - 1
 
 			// Drop current prefix if it starts with the previous one.
-			if strings.HasPrefix(prefix, metricTypePrefixes[previousIndex]) {
+			if strings.HasPrefix(prefix, metricConfigs[previousIndex].Prefix) {
 				continue
 			}
 		}
-		metricTypePrefixes = append(metricTypePrefixes, prefix)
+
+		// Parse additional config options if provided
+		if len(parts) > 1 {
+			options := strings.Split(parts[1], ";")
+			for _, option := range options {
+				keyValue := strings.Split(option, "=")
+				if len(keyValue) == 2 {
+					key, value := keyValue[0], keyValue[1]
+					switch key {
+					case "aggFields":
+						config.AggFields = value
+					case "aggAligner":
+						config.AggAligner = value
+					case "aggReducer":
+						config.AggReducer = value
+					case "aggPeriod":
+						duration, err := time.ParseDuration(value)
+						if err != nil {
+							fmt.Printf("Error parsing aggPeriod: %v\n", err)
+							continue
+						}
+						config.AggPeriod = fmt.Sprintf("%ds", int(duration.Seconds()))
+					}
+				}
+			}
+		}
+
+		metricConfigs = append(metricConfigs, config)
 	}
 
-	return metricTypePrefixes
+	return metricConfigs
 }
 
 func parseMetricExtraFilters() []collectors.MetricFilter {
